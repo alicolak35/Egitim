@@ -1,0 +1,540 @@
+import numpy as np
+import pandas as pd
+import librosa
+import cv2
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import MinMaxScaler
+from PIL import Image
+from keras.models import Sequential, Model
+from keras.layers import Conv2D, Reshape, Dense, GlobalMaxPool1D, DepthwiseConv1D, GlobalAveragePooling2D, SeparableConv2D, \
+    BatchNormalization, AvgPool2D, Bidirectional, GRU, SimpleRNN,LSTM, MaxPool2D,GlobalMaxPool2D, 
+import keras
+from keras.applications import MobileNetV3Small
+from keras.utils.vis_utils import plot_model
+from keras.utils import to_categorical
+import time
+import datetime
+
+
+train_csv_path = r"C:\Users\uniha\PycharmProjects\pythonProject1\HF_Lung\egitim_verileri.csv"
+test_csv_path = r"C:\Users\uniha\PycharmProjects\pythonProject1\HF_Lung\test_verileri.csv"
+
+genislik = 24 # Saniye basşına elde edilen dizi boyutu "8". 2.7 ile 1 saniye arasındaki patolojik sesler kullanıalacağı için 2.7 saniyeye en uygun değer olan "24" seçildi. Daha az konvolüsyon işlemi olması için bu boyut küçültülebilir.
+yukseklik= 128 #128 olma nedeni, çıkan özniteliğin doğal halinin 128 değerinin olması. Bu sayede bilgi kaybı olmayacak
+
+# Eğitim setini yükle ve düzenle
+train_data = pd.read_csv(train_csv_path)
+train_data["Etiket"] = train_data["Etiket"].map({"Rhonchi": 0, "Wheeze": 0, "D": 1, "Stridor": 0})
+
+# Veri setini yükle ve düzenle
+test_data = pd.read_csv(test_csv_path)
+test_data["Etiket"] = test_data["Etiket"].map({"Rhonchi": 0, "Wheeze": 0, "D": 1, "Stridor": 0})
+
+
+def create_mel_spectrogram(audio_path, start_time, end_time):
+    audio, sr = librosa.load(audio_path,sr=4000)
+    start_frame = int(start_time * sr)
+    end_frame = int(end_time * sr)
+    audio_segment = audio[start_frame:end_frame]
+
+    #sure = int(5*sr)-len(audio_segment)
+    #li = [0]
+    #audio_segment = np.append(audio_segment, sure*li)
+    mel_spec = librosa.feature.melspectrogram(y=audio_segment, sr=sr,n_fft=1024,win_length=300) #n_fft değeri düştükçe frekanslardaki bileşenlerin kaybolma riski artıyo.
+    mel_spec = librosa.power_to_db(mel_spec, ref=np.max) 
+    mel_spec_resized = cv2.resize(mel_spec, (yukseklik, genislik), interpolation=cv2.INTER_NEAREST) #farklı interpolasyon çeşitleri denenebilir
+    #mel_spec_resized = np.expand_dims(mel_spec_resized, axis=2)
+    mel_spec_reshaped = np.reshape(mel_spec_resized, (genislik, yukseklik))
+    #rgb = mel_spec_reshaped.convert("RGB")
+
+    return mel_spec_reshaped
+
+X_train = []
+y_train = []
+"""""
+X_train_Rh = []
+X_train_Wh = []
+X_train_D = []
+y_train_Rh = []
+y_train_Wh = []
+y_train_D = []
+"""""
+for index, row in train_data.iterrows():
+    audio_path = row["Dosya ismi"]
+    start_time = row["Baslangic"]
+    end_time = row["Bitis"]
+    etiket = row["Etiket"]
+
+    if etiket == 0 or etiket == 1:
+            start_time_obj = datetime.datetime.strptime(start_time, "%H:%M:%S.%f")
+            start_time_sec = start_time_obj.second + start_time_obj.microsecond / 1000000.0
+            end_time_obj = datetime.datetime.strptime(end_time, "%H:%M:%S.%f")
+            end_time_sec = end_time_obj.second + end_time_obj.microsecond / 1000000.0
+            mel_spec = create_mel_spectrogram(audio_path, start_time_sec, end_time_sec)
+            duration = end_time_sec - start_time_sec
+            if duration <2.7 and duration > 1: #Süre farkının olması, tek tip veri oluşturulacaği için elde edilen verilerin doğallığından uzaklaşmasına neden oluyo.
+                    X_train.append(mel_spec)
+                    y_train.append(etiket)
+
+X_test = []
+y_test = []
+
+"""""
+X_test_Rh = []
+X_test_Wh = []
+X_test_D = []
+
+y_test_Rh = []
+y_test_Wh = []
+y_test_D = []
+"""""
+ronkus_mel = []
+ronkus_eti = []
+for index, row in test_data.iterrows():
+    audio_path = row["Dosya ismi"]
+    start_time = row["Baslangic"]
+    end_time = row["Bitis"]
+    etiket = row["Etiket"]
+
+    if etiket == 0 or etiket == 1:
+
+        start_time_obj = datetime.datetime.strptime(start_time, "%H:%M:%S.%f")
+        start_time_sec = start_time_obj.second + start_time_obj.microsecond / 1000000.0
+        end_time_obj = datetime.datetime.strptime(end_time, "%H:%M:%S.%f")
+        end_time_sec = end_time_obj.second + end_time_obj.microsecond / 1000000.0
+        mel_spec = create_mel_spectrogram(audio_path, start_time_sec, end_time_sec)#bu değeri 2-3 saniyelik uzunluklar için fazla olabilir.
+        duration = end_time_sec - start_time_sec
+        if duration < 2.7 and duration > 1:
+
+            #if etiket == 0:
+             #   ronkus_mel.append(mel_spec)
+              #  ronkus_eti.append(etiket)
+                X_test.append(mel_spec)
+                y_test.append(etiket)
+
+print(X_test[0])
+print(X_test[0].shape)
+
+scaler = MinMaxScaler(feature_range=(0,1))
+shape_test = np.array(X_test).shape
+
+X_test = np.reshape(X_test,(len(X_test),-1))
+scaler.fit(X_test)
+X_test = scaler.transform(X_test)
+X_test = np.reshape(X_test,shape_test)
+X_test = np.array(X_test)
+print(X_test.shape)
+
+test_y = np.array(y_test)
+test_y_cat = to_categorical(test_y, num_classes=2)
+print(test_y_cat.shape)
+
+shape_train = np.array(X_train).shape
+X_train = np.reshape(X_train,(len(X_train),-1))
+scaler.fit(X_train)
+X_train = scaler.transform(X_train)
+X_train = np.reshape(X_train,shape_train)
+X_train = np.array(X_train)
+
+y_train = np.array(y_train)
+print(y_train[0])
+y_train = to_categorical(y_train, num_classes=2)
+
+def zamanla_isimlendirme():
+    isim = time.strftime('%c')
+    isim = isim[11:19]
+    isim = isim.replace(":", ".")
+    return isim
+
+def acc_loss_plottin(isim,history):
+    #history = model.fit(X_train,y_train)
+    plt.subplot(2, 1, 1)
+    plt.suptitle("Accuracy and Loss of Validation and Training sets")
+    plt.plot(history.history["accuracy"])
+    plt.plot(history.history["val_accuracy"])
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy(%)")
+    plt.legend(["Training", "Validation"])
+
+    plt.subplot(212)
+    plt.plot(history.history["loss"])
+    plt.plot(history.history["val_loss"])
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    # plt.title("Model loss")
+    plt.legend(["Training loss", "Validation Loss"])
+    plt.savefig(f"{isim}_loss_acc.png")
+    return
+
+def report(model,isim):
+    y_pred = model.predict(X_test, batch_size=16)
+    y_pred = np.argmax(y_pred, axis=1)
+    val_labels = test_y.reshape(-1, 1)
+    cm = confusion_matrix(val_labels, y_pred)
+    cr = classification_report(val_labels, y_pred)
+
+    print("Classification Report: \n", cr)
+
+    ax = sns.heatmap(cm, annot=True, fmt='d', cmap="crest", xticklabels=["Continious","Discontinious"], yticklabels=["Continious","Discontinious"])
+    #ax.set(xlabel="Prediction", ylabel="Actual")
+    figure = ax.get_figure()
+    figure.savefig(f"{isim}_heatmap.png")
+    return print("raporlama başarılı")
+
+
+def save_plot(model,isim):
+     plot_model(model, to_file=f"{isim}.png", show_shapes=True, show_layer_activations=True, dpi=124)
+     model.save(f"{isim}.h5")
+     return print("save_plot başarılı")
+
+from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
+from sklearn.metrics import classification_report, confusion_matrix
+from keras.optimizers import Adam
+
+"""""
+egitim_baslangic = time.time()
+model=Sequential()
+model.add(AvgPool2D(pool_size=(1,2)))
+#model.add(BatchNormalization())
+model.add(Conv2D(kernel_size=(1,1),filters=8,activation="relu"))
+model.add(BatchNormalization())
+model.add(Conv2D(kernel_size=(1,5),activation="relu",filters=16))#129*28 işlem
+model.add(BatchNormalization())
+model.add(Conv2D(kernel_size=(1,1),filters=8,activation="relu"))
+model.add(BatchNormalization())
+model.add(AvgPool2D())#20,62
+#model.add(SeparableConv2D(16, kernel_size=(2, 2), activation='relu',depth_multiplier=2))
+#model.add(BatchNormalization())
+for i in range(2):
+    model.add(SeparableConv2D(32, kernel_size=(1, 5), activation='relu',depth_multiplier=1))#6*14
+    model.add(BatchNormalization())
+model.add(AvgPool2D())#10,27
+#model.add(Dropout(0.2))
+for _ in range(1):
+    model.add(SeparableConv2D(64,kernel_size=(2, 5), activation='relu',depth_multiplier=2,strides=1))
+    model.add(BatchNormalization())
+model.add(SeparableConv2D(128,kernel_size=(1, 5), activation='relu',depth_multiplier=2,strides=1))
+model.add(BatchNormalization())
+#for i in range(1):
+#    model.add(SeparableConv2D(128,kernel_size=(3, 3), activation='relu',depth_multiplier=2, strides=1))
+#    model.add(BatchNormalization())
+model.add(GlobalAveragePooling2D())
+model.add(Dense(3,activation="softmax"))
+model.build(input_shape=(None, genislik, yukseklik ,1))
+model.compile(optimizer=Adam(), loss='categorical_crossentropy', metrics=['accuracy'])
+history = model.fit(X_train,y_train ,epochs=15,batch_size=12,validation_data=(X_test,test_y_cat))
+
+egitim_son = time.time()
+
+isim = zamanla_isimlendirme()
+save_plot(model,isim)
+acc_loss_plottin(isim)
+report(model,isim)
+
+model.summary()
+
+print("Eğitim veri hazırlama süresi: ",float(bitis_train-baslangic_train))
+print("Test veri hazırlama süresi: ",float(bitis_test-baslangic_test))
+print("Eğitim süresi: ",float(egitim_son -egitim_baslangic))
+"""""
+
+def model():
+    model1=Sequential()
+
+    #model1.add(Conv2D(kernel_size=(1,1),activation="relu",filters=16))
+    #model1.add(BatchNormalization())
+    model1.add(Conv2D(kernel_size=4,activation="relu",filters=16))
+    model1.add(BatchNormalization())
+    #model1.add(Conv2D(kernel_size=(1,1),activation="relu",filters=16))
+    #model1.add(BatchNormalization())
+
+    for i in range(1):
+        model1.add(DepthwiseConv2D(kernel_size=1, depth_multiplier=1))
+        model1.add(BatchNormalization())
+        model1.add(SeparableConv2D(12, kernel_size=(1, 5), activation='relu',depth_multiplier=1))
+        model1.add(BatchNormalization())
+        model1.add(SeparableConv2D(16, kernel_size=(1, 5), activation='relu',depth_multiplier=1,strides=(2,2)))
+        model1.add(BatchNormalization())
+        model1.add(DepthwiseConv2D(kernel_size=1,depth_multiplier=2))
+        model1.add(BatchNormalization())
+    #model1.add(MaxPool2D(pool_size=(1,2)))
+    model1.add(Dropout(0.15))
+    for _ in range(1):
+        #model1.add(DepthwiseConv2D(32, kernel_size=(1, 1), activation='relu',depth_multiplier=1))
+        #model1.add(BatchNormalization())
+        model1.add(SeparableConv2D(32,kernel_size=(1, 5), activation='relu',depth_multiplier=2,strides=(2,2)))
+        model1.add(BatchNormalization())
+        model1.add(DepthwiseConv2D(kernel_size=1,depth_multiplier=2))
+        model1.add(BatchNormalization())
+    #model1.add(MaxPool2D())#12,13
+    model1.add(SeparableConv2D(64, kernel_size=(1, 5),depth_multiplier=2))
+    model1.add(BatchNormalization())
+    #model1.add(SeparableConv2D(64,kernel_size=(1, 5), activation='relu',depth_multiplier=2,strides=1))
+    #model1.add(BatchNormalization())
+
+    model1.add(GlobalMaxPool2D())
+    #model1.add(Flatten())
+    #model1.add(Bidirectional(SimpleRNN(10,activation="relu")))
+    model1.add(Dense(2,activation="softmax"))
+    model1.build(input_shape=(None, genislik, yukseklik,1))
+    model1.compile(optimizer=Adam(learning_rate=0.0001), loss='categorical_crossentropy', metrics=['accuracy'])
+    history = model1.fit(X_train,y_train ,epochs=150,batch_size=20,validation_data=(X_test,test_y_cat))
+
+
+    isim = zamanla_isimlendirme()
+    save_plot(model1,isim)
+    acc_loss_plottin(isim)
+    report(model1,isim)
+    
+def pool_max(alpha,lr,batch,epochs):
+    base_model = MobileNetV3Small(include_top=False, input_tensor=Input(shape=(128, 128, 1)), pooling="max", weights="imagenet",alpha=alpha, include_preprocessing=False,minimalistic=False)
+    print(f"a={alpha},lr={lr},batch?{batch},epochs={epochs} is started")
+    # Freeze all layers in the base model
+    base_model.trainable = True
+
+    x = base_model.output
+    x = Dense(3, activation='softmax')(x)
+    model = Model(inputs=base_model.input,outputs=x)
+    model.compile(metrics=["accuracy"],loss="categorical_crossentropy",optimizer=Adam(learning_rate=lr))
+    history = model.fit(X_train,y_train,batch_size=batch,epochs=epochs,validation_data=(X_test,test_y_cat),validation_batch_size=batch)
+    isim= f"MaxPool_a={alpha},lr={lr},batch?{batch},epochs={epochs}"
+    save_plot(model,isim)
+    return model
+
+from sklearn.model_selection import GridSearchCV
+from keras.wrappers.scikit_learn import KerasClassifier
+model = KerasClassifier(build_fn=pool_max, verbose=1)
+#alpha,LSTM_Unit,dr,lr,batch,epochs-unit" : [5,8,11],
+# Hiperparametrelerin olası değerlerini belirleme
+parameters = {
+    'epochs': [15],
+    "lr" : [0.001,0.0001],
+    "batch": [10,30],
+    "alpha" : [0.75]
+}
+
+grid = GridSearchCV(estimator=model, param_grid=parameters, cv=2)
+grid_result = grid.fit(X_train, y_train)
+
+# En iyi sonuçları ekrana yazdırma
+ü= grid_result.best_score_
+ü1= grid_result.best_params_
+
+"""""
+"""""
+model1=Sequential()
+
+model1.add(Conv2D(kernel_size=(1,5),activation="relu",filters=16))
+model1.add(BatchNormalization())
+model1.add(SeparableConv2D(kernel_size=(1,5),filters=16,activation="relu",depth_multiplier=2))
+model1.add(BatchNormalization())
+model1.add(SeparableConv2D(kernel_size=(1,5),filters=20,activation="relu",depth_multiplier=3))
+model1.add(BatchNormalization())
+model1.add(SeparableConv2D(kernel_size=(1,5),filters=32,activation="relu",depth_multiplier=4))
+model1.add(BatchNormalization())
+model1.add(Reshape((6,4,48,32)))
+model1.add(ConvLSTM2D(filters=32,kernel_size=(1,5),activation="relu",recurrent_activation="hard_sigmoid"))
+model1.add(BatchNormalization())
+model1.add(GlobalMaxPool2D())
+model1.add(Dense(2,activation="softmax"))
+model1.build(input_shape=(None, genislik, yukseklik,1))
+model1.compile(optimizer=Adam(), loss='categorical_crossentropy', metrics=['accuracy'])
+history = model1.fit(X_train,y_train ,epochs=15,batch_size=5,validation_data=(X_test,test_y_cat))
+
+isim = zamanla_isimlendirme()
+save_plot(model1,isim)
+report(model1,isim)
+acc_loss_plottin(isim)
+
+for i in range(1):
+    model1.add(SeparableConv2D(16, kernel_size=(1, 1), activation='relu',depth_multiplier=1))
+    model1.add(BatchNormalization())
+    model1.add(SeparableConv2D(32, kernel_size=(1, 5), activation='relu',depth_multiplier=1))
+    model1.add(BatchNormalization())
+    model1.add(SeparableConv2D(64, kernel_size=(1, 1), activation='relu',depth_multiplier=1))
+    model1.add(BatchNormalization())
+    model1.add(SeparableConv2D(32, kernel_size=(1, 5), activation='relu',depth_multiplier=1))
+    model1.add(BatchNormalization())
+    model1.add(SeparableConv2D(16, kernel_size=(1, 1), activation='relu',depth_multiplier=1))
+    model1.add(BatchNormalization())
+model1.add(AvgPool2D(pool_size=(1,2)))
+model1.add(Dropout(0.2))
+for _ in range(1):
+    model1.add(SeparableConv2D(16, kernel_size=(1, 1), activation='relu',depth_multiplier=1))
+    model1.add(BatchNormalization())
+    model1.add(SeparableConv2D(32,kernel_size=(1, 5), activation='relu',depth_multiplier=2,strides=1))
+    model1.add(BatchNormalization())
+    model1.add(SeparableConv2D(16, kernel_size=(1, 1), activation='relu',depth_multiplier=1))
+    model1.add(BatchNormalization())
+model1.add(MaxPool2D())#12,13
+model1.add(SeparableConv2D(32, kernel_size=(1, 1), activation='relu', depth_multiplier=1))
+model1.add(BatchNormalization())
+model1.add(SeparableConv2D(64,kernel_size=(1, 5), activation='relu',depth_multiplier=2,strides=1))
+model1.add(BatchNormalization())
+model1.add(GlobalMaxPool2D())
+model1.add(Dense(2,activation="softmax"))
+model1.build(input_shape=(None, genislik, yukseklik,1))
+model1.compile(optimizer=Adam(), loss='categorical_crossentropy', metrics=['accuracy'])
+history = model1.fit(X_train,y_train ,epochs=15,batch_size=5,validation_data=(X_test,test_y_cat))
+egitim_son = time.time()
+
+isim = zamanla_isimlendirme()
+save_plot(model1,isim)
+report(model1,isim)
+acc_loss_plottin(isim)
+
+
+from keras.models import Sequential
+from keras.layers import Conv2D, BatchNormalization, AvgPool2D, SeparableConv2D, GlobalAveragePooling2D, Dense
+from sklearn.model_selection import GridSearchCV
+from keras.wrappers.scikit_learn import KerasClassifier
+
+def create_model(start_filters=16, middle_filters=32, end_filters=128):
+    model = Sequential()
+
+    # Başlangıç katmanları
+    model.add(Conv2D(kernel_size=(1, 1), activation="relu", filters=start_filters))
+    model.add(BatchNormalization())
+    model.add(Conv2D(kernel_size=(1, 5), activation="relu", filters=start_filters))
+    model.add(BatchNormalization())
+    model.add(Conv2D(kernel_size=(1, 1), activation="relu", filters=start_filters))
+    model.add(BatchNormalization())
+    model.add(AvgPool2D())
+
+    # Orta katmanlar
+    for _ in range(1):
+        model.add(SeparableConv2D(kernel_size=(1, 1), activation='relu', filters=middle_filters-16, depth_multiplier=1))
+        model.add(BatchNormalization())
+        model.add(SeparableConv2D(kernel_size=(1, 5), activation='relu', filters=middle_filters, depth_multiplier=1))
+        model.add(BatchNormalization())
+        model.add(SeparableConv2D(kernel_size=(1, 1), activation='relu', filters=middle_filters+16, depth_multiplier=1))
+        model.add(BatchNormalization())
+        model.add(SeparableConv2D(kernel_size=(1, 5), activation='relu', filters=middle_filters, depth_multiplier=1))
+        model.add(BatchNormalization())
+        model.add(SeparableConv2D(kernel_size=(1, 1), activation='relu', filters=middle_filters-16, depth_multiplier=1))
+        model.add(BatchNormalization())
+
+    # Son katmanlar
+    for _ in range(1):
+        model.add(SeparableConv2D(kernel_size=(1, 1), activation='relu', filters=end_filters-16, depth_multiplier=1))
+        model.add(BatchNormalization())
+        model.add(SeparableConv2D(kernel_size=(1, 5), activation='relu', filters=end_filters, depth_multiplier=2, strides=1))
+        model.add(BatchNormalization())
+        model.add(SeparableConv2D(kernel_size=(1, 1), activation='relu', filters=end_filters-16, depth_multiplier=1))
+        model.add(BatchNormalization())
+    model.add(Dropout(0.15))
+    model.add(AvgPool2D())
+    model.add(SeparableConv2D(kernel_size=(1, 1), activation='relu', filters=end_filters-16, depth_multiplier=1))
+    model.add(BatchNormalization())
+    model.add(SeparableConv2D(kernel_size=(1, 5), activation='relu', filters=end_filters, depth_multiplier=2, strides=1))
+    model.add(BatchNormalization())
+    model.add(SeparableConv2D(kernel_size=(1, 1), activation='relu', filters=end_filters-16, depth_multiplier=1))
+    model.add(BatchNormalization())
+    model.add(GlobalAveragePooling2D())
+    model.add(Dense(2, activation="softmax"))
+    model.build(input_shape=(None,genislik,yukseklik,1))
+    model.compile(optimizer=Adam(),loss="categorical_crossentropy",metrics=["accuracy"])
+    model.fit(X_train,y_train,batch_size=15,validation_data=(X_test,test_y_cat),epochs=15)
+
+    isim = zamanla_isimlendirme()
+    save_plot(model, isim)
+    report(model, isim)
+    acc_loss_plottin(isim)
+
+    return model
+
+# GridSearchCV için model yaratma fonksiyonu
+model = KerasClassifier(build_fn=create_model, verbose=1)
+
+# Hiperparametrelerin olası değerlerini belirleme
+parameters = {
+    'start_filters': [16, 32],
+    'middle_filters': [32, 64],
+    'end_filters': [64, 96]
+}
+
+# GridSearchCV kullanarak hiperparametre optimizasyonunu yapma
+grid = GridSearchCV(estimator=model, param_grid=parameters, cv=3)
+grid_result = grid.fit(X_train, y_train)
+
+# En iyi sonuçları ekrana yazdırma
+print("Best Score: ", grid_result.best_score_)
+print("Best Parameters: ", grid_result.best_params_)
+#buradan 4 tane fonksiyonu kod çalışmaya başladıktan sonra sildim
+
+print(history.history.keys())
+
+
+print("Eğitim süresi: ",float(egitim_son -egitim_baslangic))
+"""""
+""""
+
+base_model = MobileNetV3Small(include_top=False, input_shape=(130, 130, 3), pooling=None, weights="imagenet",alpha=0.75,dropout_rate=0.2, include_preprocessing=False,minimalistic=False)
+
+# Freeze all layers in the base model
+base_model.trainable = True
+
+y = base_model.output
+y = Reshape((10,1440))(y)
+y = Bidirectional(LSTM(8,activation="relu"))(y)
+y = Dense(3,activation="softmax")(y)
+
+def create_model():
+    model = Model(inputs=base_model.input, outputs=x)
+
+    model.compile(optimizer=Adam(), loss='categorical_crossentropy', metrics=['accuracy'])
+    history = model.fit(X_train, y_train,epochs=15)
+
+    isim = zamanla_isimlendirme()
+    save_plot(model, isim)
+    #acc_loss_plottin(history, isim)
+    report(model,isim)
+    print(history.history.keys())
+    plt.subplot(2, 1, 1)
+    plt.suptitle("Accuracy and Loss of Validation and Training sets")
+    plt.plot(history.history["accuracy"])
+    plt.plot(history.history["val_accuracy"])
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy(%)")
+    plt.legend(["Training", "Validation"])
+
+from scikeras.wrappers import KerasClassifier
+model1 = KerasClassifier(model=create_model(),epochs=15)
+
+base_model = MobileNetV3Small(include_top=False, input_shape=(130, 130, 3), pooling=None, weights="imagenet",
+                              alpha=0.75, dropout_rate=0.2, include_preprocessing=False, minimalistic=False)
+
+# Freeze all layers in the base model
+base_model.trainable = True
+
+z = base_model.output
+z = Reshape((10, 1440))(z)
+z = Bidirectional(GRU(8, activation="relu"))(z)
+z = Dense(3, activation="softmax")(z)
+
+
+def create_model():
+    model = Model(inputs=base_model.input, outputs=x)
+
+    model.compile(optimizer=Adam(), loss='categorical_crossentropy', metrics=['accuracy'])
+    history = model.fit(X_train, y_train, epochs=15)
+
+    isim = zamanla_isimlendirme()
+    save_plot(model, isim)
+    # acc_loss_plottin(history, isim)
+    report(model,isim)
+    print(history.history.keys())
+    plt.subplot(2, 1, 1)
+    plt.suptitle("Accuracy and Loss of Validation and Training sets")
+    plt.plot(history.history["accuracy"])
+    plt.plot(history.history["val_accuracy"])
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy(%)")
+    plt.legend(["Training", "Validation"])
+
+
+from scikeras.wrappers import KerasClassifier
+
+model2 = KerasClassifier(model=create_model(), epochs=15)
+"""""
